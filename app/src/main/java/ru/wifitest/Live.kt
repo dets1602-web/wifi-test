@@ -183,13 +183,13 @@ suspend fun runLive(ctx: Context, onState: (LiveState) -> Unit) = coroutineScope
         } else {
             gwWin.add(null)
         }
-        if (sigOk(sig) && tick % 2 == 0) {
-            hist.addLast(sig); while (hist.size > 120) hist.removeFirst() // ~1,5 мин
-        }
         val zOk = !(zWin.count() >= 5 && zWin.lossPct() >= 100.0)
         // Если телефон ушёл на 5 ГГц — место оцениваем по уровню 2,4 ГГц той же сети из эфира
         val r24 = if (w.is24) w.rssi else if (tick % 5 == 0) withContext(Dispatchers.IO) { WifiReader.scan24(ctx, w.ssid) }.also { last24 = it } else last24
         val sig = r24 ?: w.rssi
+        if (sigOk(sig) && tick % 2 == 0) {
+            hist.addLast(sig); while (hist.size > 120) hist.removeFirst() // ~1,5 мин
+        }
         val (lvl, why) = if (!w.connected) Level.BAD to "Нет Wi-Fi" else
             liveVerdict(sig, gwWin.lossPct(), zWin.lossPct(), zOk, gwWin.count())
         onState(
