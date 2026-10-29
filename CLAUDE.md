@@ -1,5 +1,5 @@
 # Wi-Fi тест (dets1602-web/wifi-test)
-Android, Kotlin + Compose, один экран. См. PRODUCT.md и DESIGN.md (скилл «дизайн приложений»).
+Android, Kotlin + Compose, два режима: «Поиск места» (Live.kt) и «Полная проверка» (Tester.kt). См. PRODUCT.md и DESIGN.md (скилл «дизайн приложений»).
 Сборка: push в main → GitHub Actions → релиз latest, ссылка:
 https://github.com/dets1602-web/wifi-test/releases/download/latest/WifiTest.apk
 Репозиторий публичный (бесплатные минуты). Ключ подписи — app/debug.keystore, не менять (иначе не обновится поверх).

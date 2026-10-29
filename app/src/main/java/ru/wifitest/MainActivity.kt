@@ -10,6 +10,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -37,6 +38,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -101,6 +103,8 @@ fun Screen() {
     var progress by remember { mutableFloatStateOf(0f) }
     var result by remember { mutableStateOf<TestResult?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
+    var mode by remember { mutableStateOf(0) } // 0 — поиск места, 1 — полная проверка
+    val spots = remember { mutableStateListOf<Spot>() }
 
     Column(Modifier.fillMaxSize().background(c.bg).safeDrawingPadding()) {
         Column(
@@ -108,6 +112,13 @@ fun Screen() {
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text("Wi-Fi тест", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = c.text)
+
+            ModeSwitch(mode, enabled = !running) { mode = it }
+
+            if (mode == 0) {
+                NetLine(now, hasLoc) { permLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION) }
+                if (now.connected) LiveScreen(spots)
+            } else {
 
             ConnectionCard(now, hasLoc) { permLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION) }
 
@@ -137,9 +148,10 @@ fun Screen() {
                     fontSize = 15.sp, color = c.muted,
                 )
             }
+            }
         }
 
-        Box(Modifier.padding(16.dp)) {
+        if (mode == 1) Box(Modifier.padding(16.dp)) {
             Button(
                 onClick = {
                     scope.launch {
@@ -339,5 +351,56 @@ fun PingBlock(p: PingResult) {
             "${p.target} · разброс ${f0(p.jitterMs)} мс · макс ${f0(p.maxMs)} мс · ${p.got} из ${p.sent}",
             fontSize = 13.sp, color = c.muted,
         )
+    }
+}
+
+@Composable
+fun ModeSwitch(mode: Int, enabled: Boolean, onChange: (Int) -> Unit) {
+    val c = LocalColors.current
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(c.surface).padding(4.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        listOf("Поиск места", "Полная проверка").forEachIndexed { i, t ->
+            val sel = mode == i
+            Box(
+                Modifier.weight(1f).height(48.dp).clip(RoundedCornerShape(12.dp))
+                    .background(if (sel) c.primary else c.surface)
+                    .clickable(enabled = enabled) { onChange(i) },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    t, fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
+                    color = if (sel) c.onPrimary else c.text,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun NetLine(w: WifiNow, hasLoc: Boolean, askLoc: () -> Unit) {
+    val c = LocalColors.current
+    if (!w.connected) {
+        Card {
+            Text("Wi-Fi не подключён", fontSize = 20.sp, fontWeight = FontWeight.SemiBold, color = c.bad)
+            Text("Подключите телефон к сети заказчика — та же сеть, что у контроллера.", fontSize = 15.sp, color = c.muted)
+        }
+        return
+    }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(w.ssid ?: "Сеть без имени", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = c.text)
+            Text(
+                "${w.band} · канал ${w.channel}" + (if (w.txMbps > 0) " · ${w.txMbps} Мбит/с" else ""),
+                fontSize = 14.sp, color = if (w.freq > 0 && !w.is24) c.warn else c.muted,
+            )
+        }
+        if (w.ssid == null && !hasLoc) TextButton(onClick = askLoc, modifier = Modifier.height(48.dp)) {
+            Text("Показать имя", fontSize = 15.sp, color = c.primary)
+        }
+    }
+    if (w.freq > 0 && !w.is24) {
+        Text("Телефон на ${w.band}, а контроллер подключается к 2,4 ГГц — переключите телефон на сеть 2,4", fontSize = 14.sp, color = c.warn)
     }
 }

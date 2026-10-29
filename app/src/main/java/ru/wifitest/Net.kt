@@ -133,7 +133,7 @@ object NetTests {
     private const val PAUSE_MS = 150L
 
     /** Один TCP-«пинг»: соединение или отказ (RST) — значит узел ответил. Время в мс или null. */
-    private fun tcpOnce(net: Network, addr: InetAddress, port: Int): Double? {
+    fun tcpOnce(net: Network, addr: InetAddress, port: Int): Double? {
         val t0 = System.nanoTime()
         val s = net.socketFactory.createSocket()
         return try {
@@ -149,7 +149,7 @@ object NetTests {
         }
     }
 
-    private fun resolve(net: Network, host: String): InetAddress? = try {
+    fun resolve(net: Network, host: String): InetAddress? = try {
         val all = net.getAllByName(host)
         all.firstOrNull { it is Inet4Address } ?: all.firstOrNull()
     } catch (e: Exception) {
@@ -180,7 +180,7 @@ object NetTests {
     }
 
     /** ICMP-пинг системной утилитой. null — если утилита недоступна. */
-    private fun icmpOnce(host: String): Double? {
+    fun icmpOnce(host: String): Double? {
         val p = Runtime.getRuntime().exec(arrayOf("/system/bin/ping", "-c", "1", "-W", "1", host))
         if (!p.waitFor(2, TimeUnit.SECONDS)) { p.destroy(); return -1.0 }
         val out = p.inputStream.bufferedReader().readText()
