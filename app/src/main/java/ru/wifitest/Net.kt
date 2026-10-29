@@ -76,7 +76,10 @@ object WifiReader {
 
     fun wifiNetwork(cm: ConnectivityManager): Network? =
         cm.allNetworks.firstOrNull {
-            cm.getNetworkCapabilities(it)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+            val caps = cm.getNetworkCapabilities(it)
+            // VPN тоже «носит» признак Wi-Fi — его отбрасываем, нужна сама сеть Wi-Fi
+            caps != null && caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
+                !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
         }
 
     @Suppress("DEPRECATION")
