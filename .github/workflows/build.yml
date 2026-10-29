@@ -14,7 +14,14 @@ jobs:
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: '17' }
       - name: Сборка
-        run: chmod +x gradlew && ./gradlew --no-daemon assembleDebug
+        run: |
+          chmod +x gradlew
+          set -o pipefail
+          ./gradlew --no-daemon assembleDebug 2>&1 | tee build.log
+      # Ошибки компиляции — в аннотации, чтобы их было видно через API
+      - name: Ошибки
+        if: failure()
+        run: grep -E "^e: |error:|What went wrong" -A3 build.log | head -40 | sed 's/^/::error::/' || true
       # Постоянная ссылка: github.com/dets1602-web/wifi-test/releases/download/latest/WifiTest.apk
       - name: APK в релиз
         run: |
