@@ -21,7 +21,8 @@ jobs:
       # Ошибки компиляции — в аннотации, чтобы их было видно через API
       - name: Ошибки
         if: failure()
-        run: grep -E "^e: |error:|What went wrong" -A3 build.log | head -40 | sed 's/^/::error::/' || true
+        run: |
+          grep -E "^e: |error:|What went wrong" -A3 build.log | head -40 | sed 's/^/::error::/' || true
       # Постоянная ссылка: github.com/dets1602-web/wifi-test/releases/download/latest/WifiTest.apk
       - name: APK в релиз
         run: |
