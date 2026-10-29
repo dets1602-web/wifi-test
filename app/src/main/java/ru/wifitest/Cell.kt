@@ -64,9 +64,19 @@ data class CellResult(
  * даже если телефон сидит на Wi-Fi. Все сокеты строго привязаны к нему — без запасного пути.
  */
 object CellTest {
-    private val ZONT_HOSTS = listOf("zont.online", "my.zont.online", "zont-online.ru")
-    private val WHITE = listOf("ya.ru", "vk.com", "gosuslugi.ru")
-    private val OTHER = listOf("google.com", "wikipedia.org", "github.com")
+    /** Сайт и приложение ZONT (не сервер контроллеров). */
+    private val ZONT_APP = listOf("my.zont.online", "zont-online.ru", "zont.online")
+    /** Название → адреса. Сайт «открывается», если ответил любой из адресов (приложения ходят не на главную). */
+    private val WHITE = listOf(
+        "ya.ru" to listOf("ya.ru", "yandex.ru"),
+        "vk.com" to listOf("vk.com", "m.vk.com", "api.vk.com"),
+        "gosuslugi.ru" to listOf("www.gosuslugi.ru", "gosuslugi.ru"),
+    )
+    private val OTHER = listOf(
+        "google.com" to listOf("www.google.com", "google.com"),
+        "wikipedia.org" to listOf("ru.wikipedia.org", "wikipedia.org"),
+        "github.com" to listOf("github.com", "api.github.com"),
+    )
     private const val COUNT = 20
 
     fun cellInfo(ctx: Context): CellInfo = try {
@@ -152,8 +162,8 @@ object CellTest {
         var c: HttpURLConnection? = null
         return try {
             c = net.openConnection(URL("https://$host/")) as HttpURLConnection
-            c.connectTimeout = 6000
-            c.readTimeout = 6000
+            c.connectTimeout = 8000
+            c.readTimeout = 8000
             c.instanceFollowRedirects = false
             c.useCaches = false
             c.responseCode // любой код ответа = сервер ответил
@@ -163,6 +173,14 @@ object CellTest {
         } finally {
             try { c?.disconnect() } catch (_: Exception) {}
         }
+    }
+
+    private fun site(net: Network, name: String, hosts: List<String>): SiteCheck {
+        for (h in hosts) {
+            val t = httpsOnce(net, h)
+            if (t != null) return SiteCheck(name, true, t)
+        }
+        return SiteCheck(name, false, null)
     }
 
     suspend fun run(ctx: Context, progress: (String, Float) -> Unit): Pair<CellResult?, String?> {
@@ -182,41 +200,46 @@ object CellTest {
             var done = 0f
             fun step(n: String) { done += 1f; progress(n, done / total) }
 
-            // 1. Пинг до ZONT
+            // 1. Пинг до сервера контроллеров ZONT
             val zont = withContext(Dispatchers.IO) {
-                var host = ZONT_HOSTS.first()
+                var host = ZONT_SERVER.first()
                 var addr: InetAddress? = null
-                for (h in ZONT_HOSTS) { addr = resolve(net, h); if (addr != null) { host = h; break } }
+                for (h in ZONT_SERVER) { addr = resolve(net, h); if (addr != null) { host = h; break } }
                 val times = mutableListOf<Double>()
                 if (addr == null) {
-                    repeat(COUNT) { step("Пинг до ZONT") }
+                    repeat(COUNT) { step("Пинг до сервера ZONT") }
                     PingResult.from("Сервер ZONT", host, COUNT, times, "Адрес не находится (DNS)")
                 } else {
+                    var port: Int? = null
                     repeat(COUNT) {
-                        tcpOnce(net, addr, 443)?.let { times += it }
-                        step("Пинг до ZONT по сотовой")
+                        val p = port
+                        val t = if (p != null) tcpOnce(net, addr, p)
+                        else ZONT_PORTS.firstNotNullOfOrNull { pp -> tcpOnce(net, addr, pp)?.also { port = pp } }
+                        t?.let { times += it }
+                        step("Пинг до сервера ZONT по сотовой")
                         delay(200)
                     }
-                    PingResult.from("Сервер ZONT", host, COUNT, times, if (times.isEmpty()) "Сервер не отвечает" else null)
+                    PingResult.from("Сервер ZONT", "$host (${addr.hostAddress})", COUNT, times, if (times.isEmpty()) "Сервер не отвечает" else null)
                 }
             }
 
-            // 2. Обмен данными с ZONT (HTTPS)
+            // 2. Сайт / приложение ZONT (HTTPS)
             val httpTimes = mutableListOf<Double>()
             withContext(Dispatchers.IO) {
-                repeat(5) {
-                    httpsOnce(net, zont.target)?.let { httpTimes += it }
-                    step("Обмен данными с ZONT")
+                repeat(5) { i ->
+                    val h = ZONT_APP[i % ZONT_APP.size]
+                    httpsOnce(net, h)?.let { httpTimes += it }
+                    step("Приложение ZONT")
                 }
             }
             val zHttp = HttpStat(5, httpTimes.size, if (httpTimes.isEmpty()) 0.0 else httpTimes.average())
 
             // 3. Белый список
             val white = withContext(Dispatchers.IO) {
-                WHITE.map { h -> httpsOnce(net, h).let { SiteCheck(h, it != null, it) }.also { step("Сайты из белого списка") } }
+                WHITE.map { (name, hosts) -> site(net, name, hosts).also { step("Сайты из белого списка") } }
             }
             val other = withContext(Dispatchers.IO) {
-                OTHER.map { h -> httpsOnce(net, h).let { SiteCheck(h, it != null, it) }.also { step("Обычные сайты") } }
+                OTHER.map { (name, hosts) -> site(net, name, hosts).also { step("Обычные сайты") } }
             }
             progress("Готово", 1f)
             return build(cellInfo(ctx).let { if (it.dbm == null) info else it }, zont, zHttp, white, other) to null
@@ -229,7 +252,7 @@ object CellTest {
         val reasons = mutableListOf<Reason>()
         val whiteOk = white.count { it.ok }
         val otherOk = other.count { it.ok }
-        val zontWorks = zont.got > 0 || zHttp.ok > 0
+        val zontWorks = zont.got > 0
 
         info.dbm?.let { d ->
             reasons += when {
@@ -250,16 +273,19 @@ object CellTest {
         }
 
         reasons += when {
-            !zontWorks -> Reason(Level.BAD, "Сервер ZONT по сотовой недоступен" +
-                if (whiteOk > 0 && otherOk == 0) " — его нет в белом списке этого оператора" else "")
-            zHttp.ok < zHttp.sent -> Reason(Level.WARN, "Обмен с ZONT с перебоями: ${zHttp.ok} из ${zHttp.sent} запросов")
-            zont.lossPct > 10 -> Reason(Level.BAD, "До ZONT теряется ${f0(zont.lossPct)}% пакетов")
-            zont.lossPct > 2 -> Reason(Level.WARN, "До ZONT потери ${f0(zont.lossPct)}%")
-            zont.avgMs > 600 -> Reason(Level.WARN, "До ZONT долго: ${f0(zont.avgMs)} мс")
+            !zontWorks -> Reason(Level.BAD, "Сервер контроллеров ZONT по сотовой недоступен" +
+                if (whiteOk > 0 && otherOk == 0) " — похоже, его нет в белом списке этого оператора" else "")
+            zont.lossPct > 10 -> Reason(Level.BAD, "До сервера ZONT теряется ${f0(zont.lossPct)}% пакетов")
+            zont.lossPct > 2 -> Reason(Level.WARN, "До сервера ZONT потери ${f0(zont.lossPct)}%")
+            zont.avgMs > 600 -> Reason(Level.WARN, "До сервера ZONT долго: ${f0(zont.avgMs)} мс")
             else -> Reason(
                 Level.GOOD,
-                "Обмен с ZONT стабильный, ${f0(zont.avgMs)} мс" + if (whiteOk > 0 && otherOk == 0) " — ZONT проходит через белый список" else "",
+                "Сервер контроллеров ZONT отвечает стабильно, ${f0(zont.avgMs)} мс" +
+                    if (whiteOk > 0 && otherOk == 0) " — проходит через белый список" else "",
             )
+        }
+        if (zHttp.ok == 0) {
+            reasons += Reason(Level.WARN, "Сайт и приложение ZONT по сотовой не открываются (на контроллер не влияет)")
         }
 
         val level = when {
@@ -284,7 +310,7 @@ object CellTest {
         r.reasons.forEach { appendLine("• ${it.text}") }
         appendLine()
         appendLine(Tester.pingLine(r.zont))
-        appendLine("HTTPS-запросы к ZONT: ${r.zontHttp.ok} из ${r.zontHttp.sent}")
+        appendLine("Приложение ZONT (HTTPS): ${r.zontHttp.ok} из ${r.zontHttp.sent}")
         appendLine("Белый список: " + r.white.joinToString { "${it.host} ${if (it.ok) "✓" else "✗"}" })
         appendLine("Обычные сайты: " + r.other.joinToString { "${it.host} ${if (it.ok) "✓" else "✗"}" })
     }
@@ -330,7 +356,7 @@ fun CellResultCards(r: CellResult, onShare: () -> Unit) {
         r.info.dbm?.let { InfoRow("Сигнал", dbm(it)) }
         PingBlock(r.zont)
         InfoRow(
-            "HTTPS к ZONT",
+            "Приложение ZONT",
             "${r.zontHttp.ok} из ${r.zontHttp.sent}" + if (r.zontHttp.ok > 0) " · ${f0(r.zontHttp.avgMs)} мс" else "",
             c.of(if (r.zontHttp.ok == r.zontHttp.sent) Level.GOOD else if (r.zontHttp.ok > 0) Level.WARN else Level.BAD),
         )

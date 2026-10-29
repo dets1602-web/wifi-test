@@ -149,6 +149,7 @@ suspend fun runLive(ctx: Context, onState: (LiveState) -> Unit) = coroutineScope
     var pingerKey = ""
     var zAddr: InetAddress? = null
     var zResolveTried = 0L
+    var zPort: Int? = null
 
     // ZONT пингуем отдельным потоком, чтобы не тормозить роутер
     launch(Dispatchers.IO) {
@@ -157,11 +158,14 @@ suspend fun runLive(ctx: Context, onState: (LiveState) -> Unit) = coroutineScope
             if (n != null) {
                 if (zAddr == null && System.currentTimeMillis() - zResolveTried > 5000) {
                     zResolveTried = System.currentTimeMillis()
-                    zAddr = listOf("zont.online", "my.zont.online", "zont-online.ru")
-                        .firstNotNullOfOrNull { NetTests.resolve(n, it) }
+                    zAddr = ZONT_SERVER.firstNotNullOfOrNull { NetTests.resolve(n, it) }
                 }
                 val a = zAddr
-                zWin.add(if (a == null) null else NetTests.tcpOnce(n, a, 443))
+                zWin.add(
+                    if (a == null) null
+                    else zPort?.let { NetTests.tcpOnce(n, a, it) }
+                        ?: ZONT_PORTS.firstNotNullOfOrNull { p -> NetTests.tcpOnce(n, a, p)?.also { zPort = p } }
+                )
             }
             delay(1200)
         }

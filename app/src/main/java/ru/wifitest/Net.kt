@@ -188,6 +188,10 @@ data class PingResult(
     }
 }
 
+/** Сервер, к которому подключаются контроллеры ZONT (по данным ZONT: s1.zont-online.ru, 77.223.120.219). */
+val ZONT_SERVER = listOf("s1.zont-online.ru", "77.223.120.219")
+val ZONT_PORTS = listOf(443, 80, 8080)
+
 object NetTests {
     private const val TIMEOUT_MS = 1000
     private const val PAUSE_MS = 150L
@@ -216,9 +220,10 @@ object NetTests {
         null
     }
 
-    /** Серия TCP-пингов до сервера в интернете (через Wi-Fi, даже если включены мобильные данные). */
+    /** Серия TCP-пингов до сервера в интернете (через Wi-Fi, даже если включены мобильные данные).
+     *  Порт выбирается сам: первый из списка, на который сервер ответил. */
     suspend fun tcpPing(
-        net: Network, title: String, hosts: List<String>, port: Int, count: Int, onStep: () -> Unit,
+        net: Network, title: String, hosts: List<String>, ports: List<Int>, count: Int, onStep: () -> Unit,
     ): PingResult = withContext(Dispatchers.IO) {
         var host = hosts.first()
         var addr: InetAddress? = null
@@ -231,8 +236,17 @@ object NetTests {
             return@withContext PingResult.from(title, host, count, emptyList(), "Адрес не находится (DNS не работает)")
         }
         val times = mutableListOf<Double>()
+        var port: Int? = null
         repeat(count) {
-            tcpOnce(net, addr, port)?.let { times += it }
+            val p = port
+            if (p != null) {
+                tcpOnce(net, addr, p)?.let { times += it }
+            } else {
+                for (pp in ports) {
+                    val t = tcpOnce(net, addr, pp)
+                    if (t != null) { port = pp; times += t; break }
+                }
+            }
             onStep()
             delay(PAUSE_MS)
         }

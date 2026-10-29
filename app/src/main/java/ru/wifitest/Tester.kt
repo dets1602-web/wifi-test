@@ -71,10 +71,10 @@ object Tester {
         val gw = start.gateway?.let { NetTests.pingGateway(net, it, COUNT) { step("Пинг до роутера") } }
         if (gw == null) repeat(COUNT) { step("Пинг до роутера") }
 
-        val inet = NetTests.tcpPing(net, "Интернет", listOf("ya.ru", "google.com"), 443, COUNT) {
+        val inet = NetTests.tcpPing(net, "Интернет", listOf("ya.ru", "google.com"), listOf(443), COUNT) {
             step("Пинг в интернет")
         }
-        val zont = NetTests.tcpPing(net, "Сервер ZONT", listOf("zont.online", "my.zont.online", "zont-online.ru"), 443, COUNT) {
+        val zont = NetTests.tcpPing(net, "Сервер ZONT", ZONT_SERVER, ZONT_PORTS, COUNT) {
             step("Пинг до сервера ZONT")
         }
 
