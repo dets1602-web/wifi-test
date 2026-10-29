@@ -91,6 +91,9 @@ class Window(private val size: Int) {
 
 data class LiveState(
     val rssi: Int = -127,
+    val on24: Boolean = true,
+    val band: String = "",
+    val rssi24: Int? = null,
     val rssiHistory: List<Int> = emptyList(),
     val gwLoss: Double = 0.0, val gwAvg: Double = 0.0, val gwJitter: Double = 0.0, val gwCount: Int = 0,
     val zLoss: Double = 0.0, val zAvg: Double = 0.0, val zCount: Int = 0,
@@ -163,6 +166,7 @@ suspend fun runLive(ctx: Context, onState: (LiveState) -> Unit) = coroutineScope
     }
 
     var tick = 0
+    var last24: Int? = null
     while (isActive) {
         w = withContext(Dispatchers.IO) { WifiReader.read(ctx) }
         net = w.network
@@ -179,18 +183,21 @@ suspend fun runLive(ctx: Context, onState: (LiveState) -> Unit) = coroutineScope
         } else {
             gwWin.add(null)
         }
-        if (w.rssi in -126..-1 && tick % 2 == 0) {
-            hist.addLast(w.rssi); while (hist.size > 120) hist.removeFirst() // ~1,5 мин
+        if (sigOk(sig) && tick % 2 == 0) {
+            hist.addLast(sig); while (hist.size > 120) hist.removeFirst() // ~1,5 мин
         }
         val zOk = !(zWin.count() >= 5 && zWin.lossPct() >= 100.0)
+        // Если телефон ушёл на 5 ГГц — место оцениваем по уровню 2,4 ГГц той же сети из эфира
+        val r24 = if (w.is24) w.rssi else if (tick % 5 == 0) withContext(Dispatchers.IO) { WifiReader.scan24(ctx, w.ssid) }.also { last24 = it } else last24
+        val sig = r24 ?: w.rssi
         val (lvl, why) = if (!w.connected) Level.BAD to "Нет Wi-Fi" else
-            liveVerdict(w.rssi, gwWin.lossPct(), zWin.lossPct(), zOk, gwWin.count())
+            liveVerdict(sig, gwWin.lossPct(), zWin.lossPct(), zOk, gwWin.count())
         onState(
             LiveState(
-                rssi = w.rssi, rssiHistory = hist.toList(),
+                rssi = w.rssi, on24 = w.is24 || w.freq == 0, band = w.band, rssi24 = r24, rssiHistory = hist.toList(),
                 gwLoss = gwWin.lossPct(), gwAvg = gwWin.avg(), gwJitter = gwWin.jitter(), gwCount = gwWin.count(),
                 zLoss = zWin.lossPct(), zAvg = zWin.avg(), zCount = zWin.count(), zontOk = zOk,
-                score = if (w.connected) scoreOf(w.rssi, gwWin.lossPct(), gwWin.avg(), zWin.lossPct(), zWin.avg(), zOk) else 0,
+                score = if (w.connected) scoreOf(sig, gwWin.lossPct(), gwWin.avg(), zWin.lossPct(), zWin.avg(), zOk) else 0,
                 level = lvl, reason = why,
             )
         )
@@ -198,6 +205,8 @@ suspend fun runLive(ctx: Context, onState: (LiveState) -> Unit) = coroutineScope
         delay(400)
     }
 }
+
+fun sigOk(v: Int) = v in -126..-1
 
 @Composable
 fun LiveScreen(spots: MutableList<Spot>) {
@@ -239,13 +248,25 @@ fun LiveScreen(spots: MutableList<Spot>) {
             Text("${st.score}", fontSize = 48.sp, fontWeight = FontWeight.Bold, color = c.of(st.level))
             Text(" из 100", fontSize = 18.sp, color = c.muted, modifier = Modifier.padding(bottom = 8.dp))
             Spacer(Modifier.weight(1f))
+            val main = st.rssi24 ?: st.rssi
             Column(horizontalAlignment = Alignment.End) {
-                Text(dbm(st.rssi), fontSize = 22.sp, fontWeight = FontWeight.SemiBold, color = c.of(rssiLevel(st.rssi)))
-                Text(rssiWord(st.rssi), fontSize = 14.sp, color = c.muted)
+                Text(dbm(main), fontSize = 22.sp, fontWeight = FontWeight.SemiBold, color = c.of(rssiLevel(main)))
+                Text(if (st.on24 || st.rssi24 != null) "2,4 ГГц · ${rssiWord(main)}" else rssiWord(main), fontSize = 14.sp, color = c.muted)
             }
         }
         Sparkline(st.rssiHistory)
-        Text("Сигнал за последние ~1,5 мин", fontSize = 13.sp, color = c.muted)
+        Text("Сигнал 2,4 ГГц за последние ~1,5 мин", fontSize = 13.sp, color = c.muted)
+        if (!st.on24) {
+            Text(
+                if (st.rssi24 != null)
+                    "Телефон сейчас на ${st.band} (${dbm(st.rssi)}). Уровень 2,4 ГГц беру из эфира — его и видит контроллер. " +
+                        "Пинги идут через ${st.band}: для точного замера обмена выключите 5 ГГц в роутере."
+                else
+                    "Телефон на ${st.band}, точку 2,4 ГГц этой сети пока не вижу — оценка по ${st.band}. " +
+                        "Включите геолокацию или выключите 5 ГГц в роутере.",
+                fontSize = 14.sp, color = c.warn,
+            )
+        }
     }
 
     Card {
@@ -335,7 +356,7 @@ fun LiveScreen(spots: MutableList<Spot>) {
             confirmButton = {
                 TextButton(onClick = {
                     spots += Spot(
-                        name.ifBlank { "Точка ${spots.size + 1}" }, st.rssi, st.gwLoss, st.gwAvg,
+                        name.ifBlank { "Точка ${spots.size + 1}" }, st.rssi24 ?: st.rssi, st.gwLoss, st.gwAvg,
                         st.zLoss, st.zAvg, st.score, st.level,
                     )
                     naming = false

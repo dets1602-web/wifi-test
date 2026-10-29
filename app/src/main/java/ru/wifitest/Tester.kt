@@ -49,10 +49,16 @@ object Tester {
 
         // Пока идёт проверка — следим, как гуляет сигнал
         val samples = Collections.synchronizedList(mutableListOf<Int>())
-        if (start.rssi in -126..-1) samples += start.rssi
+        val s24 = if (start.is24) null else WifiReader.scan24(ctx, start.ssid)
+        if (start.is24 && start.rssi in -126..-1) samples += start.rssi
+        if (s24 != null) samples += s24
         val sampler = launch {
+            var n = 0
             while (isActive) {
-                val r = WifiReader.read(ctx).rssi
+                val w = WifiReader.read(ctx)
+                // Телефон на 5 ГГц — берём уровень 2,4 ГГц этой же сети из эфира
+                val r = if (w.is24) w.rssi else (if (n % 6 == 0) WifiReader.scan24(ctx, w.ssid) else null) ?: (if (s24 != null) -127 else w.rssi)
+                n++
                 if (r in -126..-1) samples += r
                 delay(500)
             }
@@ -83,11 +89,11 @@ object Tester {
         sampler.cancel()
         val s = synchronized(samples) { samples.toList() }.ifEmpty { listOf(start.rssi) }
 
-        buildResult(start, s, gw, inet, zont, down, up)
+        buildResult(start, s, s24 != null, gw, inet, zont, down, up)
     }
 
     private fun buildResult(
-        w: WifiNow, s: List<Int>, gw: PingResult?, inet: PingResult, zont: PingResult,
+        w: WifiNow, s: List<Int>, used24: Boolean, gw: PingResult?, inet: PingResult, zont: PingResult,
         down: Double?, up: Double?,
     ): TestResult {
         val rMin = s.min()
@@ -99,7 +105,13 @@ object Tester {
             reasons += Reason(Level.WARN, "Включён VPN — интернет и ZONT мерились через него. Для точной проверки выключите VPN")
         }
         if (!w.is24 && w.freq > 0) {
-            reasons += Reason(Level.WARN, "Телефон в сети ${w.band}. Контроллер подключается к 2,4 ГГц — проверьте телефоном сеть 2,4 ГГц")
+            reasons += Reason(
+                Level.WARN,
+                if (used24)
+                    "Телефон на ${w.band}: сигнал оценён по 2,4 ГГц из эфира, а пинги шли через ${w.band}. Для точности выключите 5 ГГц в роутере"
+                else
+                    "Телефон на ${w.band}, точку 2,4 ГГц не видно — оценка по ${w.band}. Выключите 5 ГГц в роутере"
+            )
         }
 
         // Сигнал оцениваем по худшему за проверку

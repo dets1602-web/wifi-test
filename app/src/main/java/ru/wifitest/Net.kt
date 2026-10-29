@@ -56,6 +56,24 @@ data class WifiNow(
 }
 
 object WifiReader {
+    private var lastScan = 0L
+
+    /** Уровень 2,4 ГГц той же сети из эфира (сканирование), даже если телефон сидит на 5 ГГц. */
+    @Suppress("DEPRECATION")
+    fun scan24(ctx: Context, ssid: String?): Int? {
+        if (ssid == null) return null
+        return try {
+            val wm = ctx.applicationContext.getSystemService(WifiManager::class.java)
+            val now = System.currentTimeMillis()
+            if (now - lastScan > 15_000) { lastScan = now; wm.startScan() } // Android сам ограничивает частоту
+            wm.scanResults
+                .filter { it.SSID?.trim('"') == ssid && it.frequency in 2400..2500 }
+                .maxOfOrNull { it.level }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     fun wifiNetwork(cm: ConnectivityManager): Network? =
         cm.allNetworks.firstOrNull {
             cm.getNetworkCapabilities(it)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
