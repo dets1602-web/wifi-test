@@ -77,6 +77,14 @@ object WifiReader {
     /** Уровень 2,4 ГГц той же сети из эфира, даже если телефон сидит на 5 ГГц. */
     fun scan24(ctx: Context, ssid: String?): Int? = scanBands(ctx, ssid).first
 
+    fun wifiNetwork(cm: ConnectivityManager): Network? =
+        cm.allNetworks.firstOrNull {
+            val caps = cm.getNetworkCapabilities(it)
+            // VPN тоже «носит» признак Wi-Fi — его отбрасываем, нужна сама сеть Wi-Fi
+            caps != null && caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
+                !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+        }
+
     @Suppress("DEPRECATION")
     fun read(ctx: Context): WifiNow {
         return try {
