@@ -6,6 +6,8 @@ import android.media.AudioManager
 import android.media.ToneGenerator
 import android.net.Network
 import android.view.WindowManager
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -217,7 +219,19 @@ fun LiveScreen(spots: MutableList<Spot>) {
     var naming by remember { mutableStateOf(false) }
     var name by remember { mutableStateOf("") }
 
-    LaunchedEffect(Unit) { runLive(ctx) { st = it } }
+    // Замер и звук — только пока приложение на экране; свернули — пауза
+    val lifecycle = androidx.compose.ui.platform.LocalLifecycleOwner.current.lifecycle
+    var active by remember { mutableStateOf(lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) }
+    DisposableEffect(lifecycle) {
+        val obs = LifecycleEventObserver { _, e ->
+            if (e == Lifecycle.Event.ON_RESUME) active = true
+            if (e == Lifecycle.Event.ON_PAUSE) active = false
+        }
+        lifecycle.addObserver(obs)
+        onDispose { lifecycle.removeObserver(obs) }
+    }
+
+    LaunchedEffect(active) { if (active) runLive(ctx) { st = it } }
 
     // Экран не гаснет, пока ищем место
     DisposableEffect(Unit) {
@@ -227,8 +241,8 @@ fun LiveScreen(spots: MutableList<Spot>) {
     }
 
     // «Металлоискатель»: чем лучше место, тем чаще пищит
-    LaunchedEffect(sound) {
-        if (!sound) return@LaunchedEffect
+    LaunchedEffect(sound, active) {
+        if (!sound || !active) return@LaunchedEffect
         val tg = try { ToneGenerator(AudioManager.STREAM_MUSIC, 70) } catch (e: Exception) { null }
         try {
             while (isActive) {
