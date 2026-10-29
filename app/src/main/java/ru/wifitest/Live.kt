@@ -170,7 +170,10 @@ suspend fun runLive(ctx: Context, onState: (LiveState) -> Unit) = coroutineScope
         val gw = w.gateway
         if (n != null && gw != null) {
             val key = "$gw/${w.ssid}"
-            if (key != pingerKey) { pinger = GwPinger(n, gw); pingerKey = key; gwWin.clear(); zWin.clear() }
+            if (key != pingerKey) {
+                withContext(Dispatchers.IO) { Bind.probe(n) }
+                pinger = GwPinger(n, gw); pingerKey = key; gwWin.clear(); zWin.clear()
+            }
             val p = pinger!!
             gwWin.add(withContext(Dispatchers.IO) { p.once() })
         } else {

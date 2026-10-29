@@ -1,7 +1,9 @@
 package ru.wifitest
 
 import android.content.Context
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -43,6 +45,7 @@ object Tester {
     suspend fun run(ctx: Context, progress: (String, Float) -> Unit): TestResult? = coroutineScope {
         val start = WifiReader.read(ctx)
         val net = start.network ?: return@coroutineScope null
+        withContext(Dispatchers.IO) { Bind.probe(net) }
 
         // Пока идёт проверка — следим, как гуляет сигнал
         val samples = Collections.synchronizedList(mutableListOf<Int>())
@@ -92,6 +95,9 @@ object Tester {
         val rAvg = s.average().toInt()
         val reasons = mutableListOf<Reason>()
 
+        if (w.vpn) {
+            reasons += Reason(Level.WARN, "Включён VPN — интернет и ZONT мерились через него. Для точной проверки выключите VPN")
+        }
         if (!w.is24 && w.freq > 0) {
             reasons += Reason(Level.WARN, "Телефон в сети ${w.band}. Контроллер подключается к 2,4 ГГц — проверьте телефоном сеть 2,4 ГГц")
         }

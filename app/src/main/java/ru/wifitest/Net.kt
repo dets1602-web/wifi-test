@@ -15,7 +15,9 @@ import java.net.HttpURLConnection
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.Socket
 import java.net.URL
+import java.net.URLConnection
 import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 import kotlin.random.Random
@@ -32,6 +34,7 @@ data class WifiNow(
     val ip: String? = null,
     val gateway: String? = null,
     val validated: Boolean = false,
+    val vpn: Boolean = false,
     val network: Network? = null,
 ) {
     val band: String
@@ -80,8 +83,16 @@ object WifiReader {
                 }
             } else null
             val ip = lp?.linkAddresses?.map { it.address }?.firstOrNull { it is Inet4Address }?.hostAddress
-            val gw = lp?.routes?.firstOrNull { it.isDefaultRoute && it.gateway is Inet4Address }
+            val gwRoute = lp?.routes?.firstOrNull { it.isDefaultRoute && it.gateway is Inet4Address }
                 ?.gateway?.hostAddress
+                ?: lp?.routes?.map { it.gateway }?.firstOrNull { it is Inet4Address && !it.isAnyLocalAddress }?.hostAddress
+            val dhcpGw = wm.dhcpInfo?.gateway ?: 0
+            val gw = gwRoute ?: if (dhcpGw != 0) {
+                "${dhcpGw and 0xFF}.${dhcpGw shr 8 and 0xFF}.${dhcpGw shr 16 and 0xFF}.${dhcpGw shr 24 and 0xFF}"
+            } else null
+            val vpn = cm.allNetworks.any {
+                cm.getNetworkCapabilities(it)?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
+            }
             WifiNow(
                 connected = true,
                 ssid = ssid,
@@ -93,11 +104,39 @@ object WifiReader {
                 ip = ip,
                 gateway = gw,
                 validated = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true,
+                vpn = vpn,
                 network = net,
             )
         } catch (e: Exception) {
             WifiNow(false)
         }
+    }
+}
+
+/**
+ * Привязка к Wi-Fi: замеры идут именно через Wi-Fi, даже при включённых мобильных данных.
+ * Если Android запрещает привязку (включён VPN — EPERM), работаем обычным путём.
+ */
+object Bind {
+    @Volatile var direct = false
+
+    fun probe(net: Network) {
+        direct = try { net.socketFactory.createSocket().close(); false } catch (e: Exception) { true }
+    }
+
+    fun socket(net: Network): Socket {
+        if (!direct) try { return net.socketFactory.createSocket() } catch (e: Exception) { direct = true }
+        return Socket()
+    }
+
+    fun open(net: Network, url: URL): URLConnection {
+        if (!direct) try { return net.openConnection(url) } catch (e: Exception) { direct = true }
+        return url.openConnection()
+    }
+
+    fun lookup(net: Network, host: String): Array<InetAddress> {
+        if (!direct) try { return net.getAllByName(host) } catch (e: Exception) { /* ниже без привязки */ }
+        return InetAddress.getAllByName(host)
     }
 }
 
@@ -135,7 +174,7 @@ object NetTests {
     /** Один TCP-«пинг»: соединение или отказ (RST) — значит узел ответил. Время в мс или null. */
     fun tcpOnce(net: Network, addr: InetAddress, port: Int): Double? {
         val t0 = System.nanoTime()
-        val s = net.socketFactory.createSocket()
+        val s = Bind.socket(net)
         return try {
             s.connect(InetSocketAddress(addr, port), TIMEOUT_MS)
             (System.nanoTime() - t0) / 1e6
@@ -150,7 +189,7 @@ object NetTests {
     }
 
     fun resolve(net: Network, host: String): InetAddress? = try {
-        val all = net.getAllByName(host)
+        val all = Bind.lookup(net, host)
         all.firstOrNull { it is Inet4Address } ?: all.firstOrNull()
     } catch (e: Exception) {
         null
@@ -229,7 +268,7 @@ object NetTests {
         withContext(Dispatchers.IO) {
             var c: HttpURLConnection? = null
             try {
-                c = net.openConnection(URL("https://speed.cloudflare.com/__down?bytes=100000000")) as HttpURLConnection
+                c = Bind.open(net, URL("https://speed.cloudflare.com/__down?bytes=100000000")) as HttpURLConnection
                 c.connectTimeout = 5000
                 c.readTimeout = 5000
                 val input = c.inputStream
@@ -260,7 +299,7 @@ object NetTests {
         withContext(Dispatchers.IO) {
             var c: HttpURLConnection? = null
             try {
-                c = net.openConnection(URL("https://speed.cloudflare.com/__up")) as HttpURLConnection
+                c = Bind.open(net, URL("https://speed.cloudflare.com/__up")) as HttpURLConnection
                 c.connectTimeout = 5000
                 c.readTimeout = 10000
                 c.requestMethod = "POST"

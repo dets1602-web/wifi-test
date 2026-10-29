@@ -251,6 +251,9 @@ fun ConnectionCard(w: WifiNow, hasLoc: Boolean, askLoc: () -> Unit) {
         if (w.freq > 0 && !w.is24) {
             Text("Контроллер подключается к 2,4 ГГц", fontSize = 14.sp, color = c.warn)
         }
+        if (w.vpn) {
+            Text("Включён VPN — выключите его на время проверки, иначе связь с интернетом и ZONT меряется через VPN", fontSize = 14.sp, color = c.warn)
+        }
         InfoRow(
             "Скорость канала",
             when {
@@ -403,4 +406,7 @@ fun NetLine(w: WifiNow, hasLoc: Boolean, askLoc: () -> Unit) {
     if (w.freq > 0 && !w.is24) {
         Text("Телефон на ${w.band}, а контроллер подключается к 2,4 ГГц — переключите телефон на сеть 2,4", fontSize = 14.sp, color = c.warn)
     }
+    if (w.vpn) {
+            Text("Включён VPN — выключите его на время проверки, иначе связь с интернетом и ZONT меряется через VPN", fontSize = 14.sp, color = c.warn)
+        }
 }
