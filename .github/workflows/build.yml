@@ -1,0 +1,25 @@
+name: Сборка APK
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17' }
+      - name: Сборка
+        run: chmod +x gradlew && ./gradlew --no-daemon assembleDebug
+      # Постоянная ссылка: github.com/dets1602-web/wifi-test/releases/download/latest/WifiTest.apk
+      - name: APK в релиз
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk WifiTest.apk
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest WifiTest.apk --title "Wi-Fi тест $(date +%F\ %H:%M)" --notes "Сборка ${{ github.sha }}" --latest
+        env:
+          GH_TOKEN: ${{ github.token }}
