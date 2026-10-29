@@ -58,29 +58,24 @@ data class WifiNow(
 object WifiReader {
     private var lastScan = 0L
 
-    /** Уровень 2,4 ГГц той же сети из эфира (сканирование), даже если телефон сидит на 5 ГГц. */
+    /** Уровни 2,4 и 5 ГГц той же сети из эфира (сканирование): (2,4; 5). */
     @Suppress("DEPRECATION")
-    fun scan24(ctx: Context, ssid: String?): Int? {
-        if (ssid == null) return null
+    fun scanBands(ctx: Context, ssid: String?): Pair<Int?, Int?> {
+        if (ssid == null) return null to null
         return try {
             val wm = ctx.applicationContext.getSystemService(WifiManager::class.java)
             val now = System.currentTimeMillis()
             if (now - lastScan > 15_000) { lastScan = now; wm.startScan() } // Android сам ограничивает частоту
-            wm.scanResults
-                .filter { it.SSID?.trim('"') == ssid && it.frequency in 2400..2500 }
-                .maxOfOrNull { it.level }
+            val mine = wm.scanResults.filter { it.SSID?.trim('"') == ssid }
+            mine.filter { it.frequency in 2400..2500 }.maxOfOrNull { it.level } to
+                mine.filter { it.frequency in 4900..5900 }.maxOfOrNull { it.level }
         } catch (e: Exception) {
-            null
+            null to null
         }
     }
 
-    fun wifiNetwork(cm: ConnectivityManager): Network? =
-        cm.allNetworks.firstOrNull {
-            val caps = cm.getNetworkCapabilities(it)
-            // VPN тоже «носит» признак Wi-Fi — его отбрасываем, нужна сама сеть Wi-Fi
-            caps != null && caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
-                !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
-        }
+    /** Уровень 2,4 ГГц той же сети из эфира, даже если телефон сидит на 5 ГГц. */
+    fun scan24(ctx: Context, ssid: String?): Int? = scanBands(ctx, ssid).first
 
     @Suppress("DEPRECATION")
     fun read(ctx: Context): WifiNow {

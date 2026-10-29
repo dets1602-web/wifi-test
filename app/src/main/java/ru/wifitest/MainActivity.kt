@@ -140,6 +140,7 @@ fun Screen() {
                         fontSize = 15.sp, color = c.muted,
                     )
                 }
+                if (!running) WatchCard()
             } else {
 
             ConnectionCard(now, hasLoc) { permLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION) }

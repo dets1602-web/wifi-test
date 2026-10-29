@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Значок в шторке: дуги Wi-Fi, одноцветный -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="24" android:viewportHeight="24">
+    <path android:fillColor="#00000000" android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="2" android:strokeLineCap="round"
+        android:pathData="M3,9 Q12,2 21,9 M6,13 Q12,8 18,13 M9,17 Q12,14.5 15,17" />
+    <path android:fillColor="#FFFFFFFF" android:pathData="M12,19a1.6,1.6 0,1 1,0 3.2a1.6,1.6 0,1 1,0 -3.2z" />
+</vector>

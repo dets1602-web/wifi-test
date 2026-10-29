@@ -10,6 +10,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -96,6 +97,8 @@ data class LiveState(
     val on24: Boolean = true,
     val band: String = "",
     val rssi24: Int? = null,
+    val rssi5: Int? = null,
+    val home: Boolean = false,
     val rssiHistory: List<Int> = emptyList(),
     val gwLoss: Double = 0.0, val gwAvg: Double = 0.0, val gwJitter: Double = 0.0, val gwCount: Int = 0,
     val zLoss: Double = 0.0, val zAvg: Double = 0.0, val zCount: Int = 0,
@@ -108,7 +111,15 @@ data class LiveState(
 data class Spot(
     val name: String, val rssi: Int, val gwLoss: Double, val gwAvg: Double,
     val zLoss: Double, val zAvg: Double, val score: Int, val level: Level,
+    val rssi24: Int? = null, val rssi5: Int? = null, val home: Boolean = false,
 )
+
+/** Настройки приложения (переживают перезапуск). */
+object Prefs {
+    private fun sp(ctx: Context) = ctx.applicationContext.getSharedPreferences("app", Context.MODE_PRIVATE)
+    fun home(ctx: Context) = sp(ctx).getBoolean("home", false)
+    fun setHome(ctx: Context, v: Boolean) = sp(ctx).edit().putBoolean("home", v).apply()
+}
 
 /** Оценка места 0–100: сигнал 50 %, обмен с роутером 30 %, связь с ZONT 20 %. */
 fun scoreOf(rssi: Int, gwLoss: Double, gwAvg: Double, zLoss: Double, zAvg: Double, zOk: Boolean): Int {
@@ -118,13 +129,15 @@ fun scoreOf(rssi: Int, gwLoss: Double, gwAvg: Double, zLoss: Double, zAvg: Doubl
     return ((sig * 50 + gw * 30 + z * 20)).toInt().coerceIn(0, 100)
 }
 
-fun liveVerdict(rssi: Int, gwLoss: Double, zLoss: Double, zOk: Boolean, gwCount: Int): Pair<Level, String> {
+fun liveVerdict(rssi: Int, gwLoss: Double, zLoss: Double, zOk: Boolean, gwCount: Int, home: Boolean = false): Pair<Level, String> {
+    val tName = if (home) "Интернет" else "Сервер ZONT"
+    val tTo = if (home) "в интернет" else "до ZONT"
     val sigL = rssiLevel(rssi)
     return when {
         gwCount < 3 -> Level.WARN to "Меряю…"
         gwLoss > 10 -> Level.BAD to "Пакеты до роутера теряются: ${f0(gwLoss)}%"
-        !zOk -> Level.BAD to "Сервер ZONT не отвечает"
-        zLoss > 10 -> Level.BAD to "До ZONT теряется ${f0(zLoss)}%"
+        !zOk -> Level.BAD to "$tName не отвечает"
+        zLoss > 10 -> Level.BAD to "Пакеты $tTo теряются: ${f0(zLoss)}%"
         sigL == Level.BAD -> Level.BAD to "Слабый сигнал"
         gwLoss > 0 || zLoss > 0 -> Level.WARN to "Есть потери пакетов"
         sigL == Level.WARN -> Level.WARN to "Сигнал на грани"
@@ -139,7 +152,10 @@ fun placeWord(l: Level) = when (l) {
 }
 
 /** Живой замер: пока экран открыт — каждые 0,4 с пинг роутера, каждые ~1,2 с пинг ZONT. */
-suspend fun runLive(ctx: Context, onState: (LiveState) -> Unit) = coroutineScope {
+suspend fun runLive(ctx: Context, home: Boolean, onState: (LiveState) -> Unit) = coroutineScope {
+    // Цель второго пинга: дома — интернет, на объекте — сервер контроллеров ZONT
+    val zHosts = if (home) listOf("ya.ru", "google.com") else ZONT_SERVER
+    val zPorts = if (home) listOf(443) else ZONT_PORTS
     val gwWin = Window(25)    // ~10 секунд
     val zWin = Window(10)     // ~12 секунд
     val hist = ArrayDeque<Int>()
@@ -158,13 +174,13 @@ suspend fun runLive(ctx: Context, onState: (LiveState) -> Unit) = coroutineScope
             if (n != null) {
                 if (zAddr == null && System.currentTimeMillis() - zResolveTried > 5000) {
                     zResolveTried = System.currentTimeMillis()
-                    zAddr = ZONT_SERVER.firstNotNullOfOrNull { NetTests.resolve(n, it) }
+                    zAddr = zHosts.firstNotNullOfOrNull { NetTests.resolve(n, it) }
                 }
                 val a = zAddr
                 zWin.add(
                     if (a == null) null
                     else zPort?.let { NetTests.tcpOnce(n, a, it) }
-                        ?: ZONT_PORTS.firstNotNullOfOrNull { p -> NetTests.tcpOnce(n, a, p)?.also { zPort = p } }
+                        ?: zPorts.firstNotNullOfOrNull { p -> NetTests.tcpOnce(n, a, p)?.also { zPort = p } }
                 )
             }
             delay(1200)
@@ -172,7 +188,7 @@ suspend fun runLive(ctx: Context, onState: (LiveState) -> Unit) = coroutineScope
     }
 
     var tick = 0
-    var last24: Int? = null
+    var bands: Pair<Int?, Int?> = null to null
     while (isActive) {
         w = withContext(Dispatchers.IO) { WifiReader.read(ctx) }
         net = w.network
@@ -191,16 +207,20 @@ suspend fun runLive(ctx: Context, onState: (LiveState) -> Unit) = coroutineScope
         }
         val zOk = !(zWin.count() >= 5 && zWin.lossPct() >= 100.0)
         // Если телефон ушёл на 5 ГГц — место оцениваем по уровню 2,4 ГГц той же сети из эфира
-        val r24 = if (w.is24) w.rssi else if (tick % 5 == 0) withContext(Dispatchers.IO) { WifiReader.scan24(ctx, w.ssid) }.also { last24 = it } else last24
-        val sig = r24 ?: w.rssi
+        if (tick % 5 == 0) bands = withContext(Dispatchers.IO) { WifiReader.scanBands(ctx, w.ssid) }
+        val on5 = w.freq in 4900..5900
+        val r24 = if (w.is24) w.rssi else bands.first
+        val r5 = if (on5) w.rssi else bands.second
+        // Дома — по диапазону, на котором сидит телефон; для ZONT — по 2,4 ГГц
+        val sig = if (home) w.rssi else (r24 ?: w.rssi)
         if (sigOk(sig) && tick % 2 == 0) {
             hist.addLast(sig); while (hist.size > 120) hist.removeFirst() // ~1,5 мин
         }
         val (lvl, why) = if (!w.connected) Level.BAD to "Нет Wi-Fi" else
-            liveVerdict(sig, gwWin.lossPct(), zWin.lossPct(), zOk, gwWin.count())
+            liveVerdict(sig, gwWin.lossPct(), zWin.lossPct(), zOk, gwWin.count(), home)
         onState(
             LiveState(
-                rssi = w.rssi, on24 = w.is24 || w.freq == 0, band = w.band, rssi24 = r24, rssiHistory = hist.toList(),
+                rssi = w.rssi, on24 = w.is24 || w.freq == 0, band = w.band, rssi24 = r24, rssi5 = r5, home = home, rssiHistory = hist.toList(),
                 gwLoss = gwWin.lossPct(), gwAvg = gwWin.avg(), gwJitter = gwWin.jitter(), gwCount = gwWin.count(),
                 zLoss = zWin.lossPct(), zAvg = zWin.avg(), zCount = zWin.count(), zontOk = zOk,
                 score = if (w.connected) scoreOf(sig, gwWin.lossPct(), gwWin.avg(), zWin.lossPct(), zWin.avg(), zOk) else 0,
@@ -235,7 +255,8 @@ fun LiveScreen(spots: MutableList<Spot>) {
         onDispose { lifecycle.removeObserver(obs) }
     }
 
-    LaunchedEffect(active) { if (active) runLive(ctx) { st = it } }
+    var home by remember { mutableStateOf(Prefs.home(ctx)) }
+    LaunchedEffect(active, home) { if (active) { st = LiveState(home = home); runLive(ctx, home) { st = it } } }
 
     // Экран не гаснет, пока ищем место
     DisposableEffect(Unit) {
@@ -259,6 +280,8 @@ fun LiveScreen(spots: MutableList<Spot>) {
         }
     }
 
+    PurposeSwitch(home) { home = it; Prefs.setHome(ctx, it) }
+
     Card {
         Text(placeWord(st.level), fontSize = 30.sp, fontWeight = FontWeight.Bold, color = c.of(st.level))
         Text(st.reason, fontSize = 17.sp, color = c.text)
@@ -266,15 +289,26 @@ fun LiveScreen(spots: MutableList<Spot>) {
             Text("${st.score}", fontSize = 48.sp, fontWeight = FontWeight.Bold, color = c.of(st.level))
             Text(" из 100", fontSize = 18.sp, color = c.muted, modifier = Modifier.padding(bottom = 8.dp))
             Spacer(Modifier.weight(1f))
-            val main = st.rssi24 ?: st.rssi
+            val main = if (st.home) st.rssi else (st.rssi24 ?: st.rssi)
             Column(horizontalAlignment = Alignment.End) {
                 Text(dbm(main), fontSize = 22.sp, fontWeight = FontWeight.SemiBold, color = c.of(rssiLevel(main)))
-                Text(if (st.on24 || st.rssi24 != null) "2,4 ГГц · ${rssiWord(main)}" else rssiWord(main), fontSize = 14.sp, color = c.muted)
+                Text(
+                    when {
+                        st.home -> "${st.band} · ${rssiWord(main)}"
+                        st.on24 || st.rssi24 != null -> "2,4 ГГц · ${rssiWord(main)}"
+                        else -> rssiWord(main)
+                    },
+                    fontSize = 14.sp, color = c.muted,
+                )
             }
         }
+        BandsRow(st.rssi24, st.rssi5, if (st.on24) "2,4" else "5")
         Sparkline(st.rssiHistory)
-        Text("Сигнал 2,4 ГГц за последние ~1,5 мин", fontSize = 13.sp, color = c.muted)
-        if (!st.on24) {
+        Text(
+            if (st.home) "Сигнал (${st.band}) за последние ~1,5 мин" else "Сигнал 2,4 ГГц за последние ~1,5 мин",
+            fontSize = 13.sp, color = c.muted,
+        )
+        if (!st.home && !st.on24) {
             Text(
                 if (st.rssi24 != null)
                     "Телефон сейчас на ${st.band} (${dbm(st.rssi)}). Уровень 2,4 ГГц беру из эфира — его и видит контроллер. " +
@@ -298,7 +332,7 @@ fun LiveScreen(spots: MutableList<Spot>) {
         )
         val zL = when { !st.zontOk || st.zLoss > 10 -> Level.BAD; st.zLoss > 0 -> Level.WARN; else -> Level.GOOD }
         InfoRow(
-            "Сервер ZONT",
+            if (st.home) "Интернет" else "Сервер ZONT",
             if (st.zCount == 0) "—" else if (!st.zontOk) "не отвечает"
             else "${f0(st.zAvg)} мс · потери ${f0(st.zLoss)}%",
             c.of(zL),
@@ -338,7 +372,13 @@ fun LiveScreen(spots: MutableList<Spot>) {
                             color = c.text,
                         )
                         Text(
-                            "${dbm(s.rssi)} · роутер потери ${f0(s.gwLoss)}% · ZONT ${f0(s.zAvg)} мс, потери ${f0(s.zLoss)}%",
+                            listOfNotNull(
+                                s.rssi24?.let { "2,4: ${dbm(it)}" },
+                                s.rssi5?.let { "5: ${dbm(it)}" },
+                                if (s.rssi24 == null && s.rssi5 == null) dbm(s.rssi) else null,
+                                "роутер потери ${f0(s.gwLoss)}%",
+                                (if (s.home) "интернет" else "ZONT") + " ${f0(s.zAvg)} мс, потери ${f0(s.zLoss)}%",
+                            ).joinToString(" · "),
                             fontSize = 13.sp, color = c.muted,
                         )
                     }
@@ -375,7 +415,7 @@ fun LiveScreen(spots: MutableList<Spot>) {
                 TextButton(onClick = {
                     spots += Spot(
                         name.ifBlank { "Точка ${spots.size + 1}" }, st.rssi24 ?: st.rssi, st.gwLoss, st.gwAvg,
-                        st.zLoss, st.zAvg, st.score, st.level,
+                        st.zLoss, st.zAvg, st.score, st.level, st.rssi24, st.rssi5, st.home,
                     )
                     naming = false
                 }) { Text("Сохранить", color = c.primary, fontSize = 16.sp) }
@@ -407,5 +447,48 @@ fun Sparkline(values: List<Int>) {
             if (i == 0) path.moveTo(x, y(v)) else path.lineTo(x, y(v))
         }
         drawPath(path, c.primary, style = Stroke(width = 5f, cap = StrokeCap.Round))
+    }
+}
+
+@Composable
+fun PurposeSwitch(home: Boolean, onChange: (Boolean) -> Unit) {
+    val c = LocalColors.current
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text("Ищу место для", fontSize = 15.sp, color = c.muted, modifier = Modifier.weight(1f))
+        listOf(false to "ZONT", true to "Дом").forEach { (v, t) ->
+            val sel = home == v
+            Box(
+                Modifier.padding(start = 6.dp).height(48.dp).clip(CircleShape)
+                    .background(if (sel) c.primary else c.surface)
+                    .clickable { onChange(v) }
+                    .padding(horizontal = 18.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(t, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = if (sel) c.onPrimary else c.text)
+            }
+        }
+    }
+}
+
+/** Оба диапазона рядом; тот, на котором сидит телефон, — жирным. */
+@Composable
+fun BandsRow(r24: Int?, r5: Int?, current: String) {
+    val c = LocalColors.current
+    if (r24 == null && r5 == null) return
+    Row(Modifier.fillMaxWidth()) {
+        listOf("2,4" to r24, "5" to r5).forEach { (b, v) ->
+            Column(Modifier.weight(1f)) {
+                Text(
+                    "$b ГГц" + if (b == current) " · сейчас" else "",
+                    fontSize = 13.sp, color = c.muted,
+                )
+                Text(
+                    v?.let { dbm(it) } ?: "нет",
+                    fontSize = 18.sp,
+                    fontWeight = if (b == current) FontWeight.Bold else FontWeight.Medium,
+                    color = v?.let { c.of(rssiLevel(it)) } ?: c.muted,
+                )
+            }
+        }
     }
 }

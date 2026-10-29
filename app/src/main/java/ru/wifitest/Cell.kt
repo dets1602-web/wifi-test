@@ -183,6 +183,38 @@ object CellTest {
         return SiteCheck(name, false, null)
     }
 
+    enum class Net { FULL, WHITELIST, NONE, NO_CELL, VPN }
+
+    data class Quick(val net: Net, val zont: Boolean?)
+
+    /** Быстрая проверка для фонового наблюдения (~10–20 с). */
+    suspend fun quick(ctx: Context): Quick {
+        val acq = acquire(ctx) ?: return Quick(Net.NO_CELL, null)
+        val (net, release) = acq
+        try {
+            return withContext(Dispatchers.IO) {
+                val bindOk = try { net.socketFactory.createSocket().close(); true } catch (e: Exception) { false }
+                if (!bindOk) return@withContext Quick(Net.VPN, null)
+                val full = OTHER.take(2).any { (n, h) -> site(net, n, h).ok }
+                val state = when {
+                    full -> Net.FULL
+                    WHITE.any { (n, h) -> site(net, n, h).ok } -> Net.WHITELIST
+                    else -> Net.NONE
+                }
+                val addr = ZONT_SERVER.firstNotNullOfOrNull { resolve(net, it) }
+                var zOk = false
+                if (addr != null) {
+                    repeat(3) {
+                        if (!zOk && ZONT_PORTS.any { p -> tcpOnce(net, addr, p) != null }) zOk = true
+                    }
+                }
+                Quick(state, zOk)
+            }
+        } finally {
+            release()
+        }
+    }
+
     suspend fun run(ctx: Context, progress: (String, Float) -> Unit): Pair<CellResult?, String?> {
         progress("Включаю мобильный интернет", 0.02f)
         val info = cellInfo(ctx)
