@@ -103,7 +103,9 @@ fun Screen() {
     var progress by remember { mutableFloatStateOf(0f) }
     var result by remember { mutableStateOf<TestResult?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
-    var mode by remember { mutableStateOf(0) } // 0 — поиск места, 1 — полная проверка
+    var mode by remember { mutableStateOf(0) } // 0 — поиск места, 1 — полная проверка Wi-Fi, 2 — сотовая
+    var cellResult by remember { mutableStateOf<CellResult?>(null) }
+    var cellError by remember { mutableStateOf<String?>(null) }
     val spots = remember { mutableStateListOf<Spot>() }
 
     Column(Modifier.fillMaxSize().background(c.bg).safeDrawingPadding()) {
@@ -111,13 +113,33 @@ fun Screen() {
             Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text("Wi-Fi тест", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = c.text)
+            Text("Тест связи", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = c.text)
 
             ModeSwitch(mode, enabled = !running) { mode = it }
 
             if (mode == 0) {
                 NetLine(now, hasLoc) { permLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION) }
                 if (now.connected) LiveScreen(spots)
+            } else if (mode == 2) {
+                if (!running) CellIntro()
+                if (running) ProgressCard(stepName, progress)
+                cellError?.let { Card { Text(it, fontSize = 16.sp, color = c.bad) } }
+                cellResult?.let { r ->
+                    if (!running) CellResultCards(r) {
+                        val i = Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(Intent.EXTRA_TEXT, CellTest.shareText(r))
+                        }
+                        ctx.startActivity(Intent.createChooser(i, "Отправить результат"))
+                    }
+                }
+                if (cellResult == null && cellError == null && !running) {
+                    Text(
+                        "Проверка обмена с сервером ZONT через мобильную сеть и режима белых списков. " +
+                            "Мобильные данные должны быть включены, VPN — выключен. Около 30 секунд.",
+                        fontSize = 15.sp, color = c.muted,
+                    )
+                }
             } else {
 
             ConnectionCard(now, hasLoc) { permLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION) }
@@ -148,6 +170,46 @@ fun Screen() {
                     fontSize = 15.sp, color = c.muted,
                 )
             }
+            }
+        }
+
+        if (mode == 2) Box(Modifier.padding(16.dp)) {
+            Button(
+                onClick = {
+                    scope.launch {
+                        running = true
+                        cellError = null
+                        cellResult = null
+                        progress = 0f
+                        stepName = "Начинаю"
+                        val (r, err) = try {
+                            CellTest.run(ctx) { n, p -> stepName = n; progress = p }
+                        } catch (e: Exception) {
+                            null to "Проверка прервалась: ${e.message ?: e.javaClass.simpleName}"
+                        }
+                        cellResult = r
+                        cellError = err
+                        running = false
+                    }
+                },
+                enabled = !running,
+                modifier = Modifier.fillMaxWidth().height(56.dp),
+                shape = RoundedCornerShape(16.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = c.primary,
+                    contentColor = c.onPrimary,
+                    disabledContainerColor = c.line,
+                    disabledContentColor = c.muted,
+                ),
+            ) {
+                Text(
+                    when {
+                        running -> "Идёт проверка…"
+                        cellResult != null || cellError != null -> "Проверить ещё раз"
+                        else -> "Проверить сотовую"
+                    },
+                    fontSize = 18.sp, fontWeight = FontWeight.SemiBold,
+                )
             }
         }
 
@@ -364,7 +426,7 @@ fun ModeSwitch(mode: Int, enabled: Boolean, onChange: (Int) -> Unit) {
         Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(c.surface).padding(4.dp),
         horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        listOf("Поиск места", "Полная проверка").forEachIndexed { i, t ->
+        listOf("Поиск места", "Wi-Fi", "Сотовая").forEachIndexed { i, t ->
             val sel = mode == i
             Box(
                 Modifier.weight(1f).height(48.dp).clip(RoundedCornerShape(12.dp))
