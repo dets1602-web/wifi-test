@@ -30,6 +30,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -78,6 +81,10 @@ object CellTest {
         "github.com" to listOf("github.com", "api.github.com"),
     )
     private const val COUNT = 20
+    private const val PORT_DISCOVERY_ROUNDS = 3
+    private const val PROBE_INTERVAL_MS = 200L
+    private const val TCP_TIMEOUT_MS = 2000
+    private const val MANUAL_HTTPS_TIMEOUT_MS = 4000
 
     fun cellInfo(ctx: Context): CellInfo = try {
         val tm = ctx.getSystemService(TelephonyManager::class.java)
@@ -114,23 +121,28 @@ object CellTest {
             .build()
         var cb: ConnectivityManager.NetworkCallback? = null
         val release = { cb?.let { try { cm.unregisterNetworkCallback(it) } catch (_: Exception) {} }; Unit }
-        val net = withTimeoutOrNull(12_000) {
-            suspendCancellableCoroutine<Network> { cont ->
-                val callback = object : ConnectivityManager.NetworkCallback() {
-                    override fun onAvailable(network: Network) {
-                        if (cont.isActive) cont.resume(network)
+        var acquired = false
+        try {
+            val net = withTimeoutOrNull(12_000) {
+                suspendCancellableCoroutine<Network> { cont ->
+                    val callback = object : ConnectivityManager.NetworkCallback() {
+                        override fun onAvailable(network: Network) {
+                            if (cont.isActive) cont.resume(network)
+                        }
+                    }
+                    cb = callback
+                    try {
+                        cm.requestNetwork(req, callback)
+                    } catch (e: Exception) {
+                        if (cont.isActive) cont.cancel(e)
                     }
                 }
-                cb = callback
-                try {
-                    cm.requestNetwork(req, callback)
-                } catch (e: Exception) {
-                    if (cont.isActive) cont.cancel(e)
-                }
-            }
+            } ?: return null
+            acquired = true
+            return net to release
+        } finally {
+            if (!acquired) release()
         }
-        if (net == null) { release(); return null }
-        return net to release
     }
 
     private fun resolve(net: Network, host: String): InetAddress? = try {
@@ -142,28 +154,27 @@ object CellTest {
 
     private fun tcpOnce(net: Network, addr: InetAddress, port: Int): Double? {
         val t0 = System.nanoTime()
-        val s = net.socketFactory.createSocket() // без запасного пути: только сотовая
         return try {
-            s.connect(InetSocketAddress(addr, port), 2000)
-            (System.nanoTime() - t0) / 1e6
+            net.socketFactory.createSocket().use { socket ->
+                socket.connect(InetSocketAddress(addr, port), TCP_TIMEOUT_MS)
+                (System.nanoTime() - t0) / 1e6
+            }
         } catch (e: ConnectException) {
             val ms = (System.nanoTime() - t0) / 1e6
-            if (e.message?.contains("refused", true) == true && ms < 2000) ms else null
+            if (e.message?.contains("refused", true) == true && ms < TCP_TIMEOUT_MS) ms else null
         } catch (e: Exception) {
             null
-        } finally {
-            try { s.close() } catch (_: Exception) {}
         }
     }
 
     /** Настоящий обмен: HTTPS-запрос, ответ получен — значит данные ходят. */
-    private fun httpsOnce(net: Network, host: String): Double? {
+    private fun httpsOnce(net: Network, host: String, timeoutMs: Int = 8000): Double? {
         val t0 = System.nanoTime()
         var c: HttpURLConnection? = null
         return try {
             c = net.openConnection(URL("https://$host/")) as HttpURLConnection
-            c.connectTimeout = 8000
-            c.readTimeout = 8000
+            c.connectTimeout = timeoutMs
+            c.readTimeout = timeoutMs
             c.instanceFollowRedirects = false
             c.useCaches = false
             c.responseCode // любой код ответа = сервер ответил
@@ -181,6 +192,52 @@ object CellTest {
             if (t != null) return SiteCheck(name, true, t)
         }
         return SiteCheck(name, false, null)
+    }
+
+    private suspend fun manualSite(net: Network, name: String, hosts: List<String>): SiteCheck = coroutineScope {
+        val times = hosts.map { host ->
+            async(Dispatchers.IO) { httpsOnce(net, host, MANUAL_HTTPS_TIMEOUT_MS) }
+        }.awaitAll()
+        val ms = times.firstOrNull { it != null }
+        SiteCheck(name, ms != null, ms)
+    }
+
+    private suspend fun manualZontPing(net: Network, advance: (Int) -> Unit): PingResult = coroutineScope {
+        val target = withContext(Dispatchers.IO) {
+            ZONT_SERVER.firstNotNullOfOrNull { host -> resolve(net, host)?.let { host to it } }
+        }
+        if (target == null) {
+            advance(COUNT)
+            return@coroutineScope PingResult.from(
+                "Сервер ZONT", ZONT_SERVER.first(), 0, emptyList(), "Адрес не находится (DNS)",
+            )
+        }
+
+        val (host, address) = target
+        val label = "$host (${address.hostAddress})"
+        for (round in 1..PORT_DISCOVERY_ROUNDS) {
+            val discovery = ZONT_PORTS.map { port ->
+                async(Dispatchers.IO) { tcpOnce(net, address, port)?.let { port to it } }
+            }.awaitAll().firstOrNull { it != null }
+            advance(1)
+            if (discovery != null) {
+                val (port, firstMs) = discovery
+                // Нормальный интервал сохраняется, а зависший сокет не задерживает следующий старт.
+                val remaining = (1..(COUNT - round)).map { index ->
+                    async {
+                        delay(index * PROBE_INTERVAL_MS)
+                        withContext(Dispatchers.IO) { tcpOnce(net, address, port) }.also { advance(1) }
+                    }
+                }.awaitAll()
+                return@coroutineScope PingResult.from(
+                    "Сервер ZONT", label, COUNT, listOf(firstMs) + remaining.filterNotNull(),
+                )
+            }
+            if (round < PORT_DISCOVERY_ROUNDS) delay(PROBE_INTERVAL_MS)
+        }
+
+        advance(COUNT - PORT_DISCOVERY_ROUNDS)
+        PingResult.from("Сервер ZONT", label, PORT_DISCOVERY_ROUNDS, emptyList(), "Сервер не отвечает")
     }
 
     enum class Net { FULL, WHITELIST, NONE, NO_CELL, VPN }
@@ -228,53 +285,35 @@ object CellTest {
             }
             if (!bindOk) return null to "VPN не даёт проверить сотовую отдельно. Выключите VPN и повторите."
 
-            val total = COUNT + 5 + WHITE.size + OTHER.size + 1f
-            var done = 0f
-            fun step(n: String) { done += 1f; progress(n, done / total) }
+            return coroutineScope {
+                val httpsCount = 5
+                val total = COUNT + httpsCount + WHITE.size + OTHER.size
+                var done = 0
+                // Все шаги возвращаются в контекст вызывающего экрана после сетевого I/O.
+                fun advance(count: Int = 1) {
+                    done += count
+                    progress("Проверяю сотовую", 0.02f + 0.97f * done / total)
+                }
 
-            // 1. Пинг до сервера контроллеров ZONT
-            val zont = withContext(Dispatchers.IO) {
-                var host = ZONT_SERVER.first()
-                var addr: InetAddress? = null
-                for (h in ZONT_SERVER) { addr = resolve(net, h); if (addr != null) { host = h; break } }
-                val times = mutableListOf<Double>()
-                if (addr == null) {
-                    repeat(COUNT) { step("Пинг до сервера ZONT") }
-                    PingResult.from("Сервер ZONT", host, COUNT, times, "Адрес не находится (DNS)")
-                } else {
-                    var port: Int? = null
-                    repeat(COUNT) {
-                        val p = port
-                        val t = if (p != null) tcpOnce(net, addr, p)
-                        else ZONT_PORTS.firstNotNullOfOrNull { pp -> tcpOnce(net, addr, pp)?.also { port = pp } }
-                        t?.let { times += it }
-                        step("Пинг до сервера ZONT по сотовой")
-                        delay(200)
+                val zont = async { manualZontPing(net, ::advance) }
+                val http = List(httpsCount) { index ->
+                    async {
+                        withContext(Dispatchers.IO) {
+                            httpsOnce(net, ZONT_APP[index % ZONT_APP.size], MANUAL_HTTPS_TIMEOUT_MS)
+                        }.also { advance() }
                     }
-                    PingResult.from("Сервер ZONT", "$host (${addr.hostAddress})", COUNT, times, if (times.isEmpty()) "Сервер не отвечает" else null)
                 }
-            }
+                val white = WHITE.map { (name, hosts) -> async { manualSite(net, name, hosts).also { advance() } } }
+                val other = OTHER.map { (name, hosts) -> async { manualSite(net, name, hosts).also { advance() } } }
 
-            // 2. Сайт / приложение ZONT (HTTPS)
-            val httpTimes = mutableListOf<Double>()
-            withContext(Dispatchers.IO) {
-                repeat(5) { i ->
-                    val h = ZONT_APP[i % ZONT_APP.size]
-                    httpsOnce(net, h)?.let { httpTimes += it }
-                    step("Приложение ZONT")
-                }
+                val ping = zont.await()
+                val httpTimes = http.awaitAll().filterNotNull()
+                val zHttp = HttpStat(httpsCount, httpTimes.size, httpTimes.takeIf { it.isNotEmpty() }?.average() ?: 0.0)
+                val whiteSites = white.awaitAll()
+                val otherSites = other.awaitAll()
+                progress("Готово", 1f)
+                build(cellInfo(ctx).let { if (it.dbm == null) info else it }, ping, zHttp, whiteSites, otherSites) to null
             }
-            val zHttp = HttpStat(5, httpTimes.size, if (httpTimes.isEmpty()) 0.0 else httpTimes.average())
-
-            // 3. Белый список
-            val white = withContext(Dispatchers.IO) {
-                WHITE.map { (name, hosts) -> site(net, name, hosts).also { step("Сайты из белого списка") } }
-            }
-            val other = withContext(Dispatchers.IO) {
-                OTHER.map { (name, hosts) -> site(net, name, hosts).also { step("Обычные сайты") } }
-            }
-            progress("Готово", 1f)
-            return build(cellInfo(ctx).let { if (it.dbm == null) info else it }, zont, zHttp, white, other) to null
         } finally {
             release()
         }
